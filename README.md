@@ -1,6 +1,6 @@
-# Wareshare Eink frame buffer driver
+# Wareshare Eink Frame Buffer driver
 
-This is a frame buffer driver for the Waveshare 7.5" E-Ink
+This is a Frame Buffer driver for the Waveshare 7.5" E-Ink
 display. The idea was to have a low-power low-cost Linux console. The
 driver was built for the Raspeberry Pi (RPi) Linux kernel.
 
@@ -27,23 +27,28 @@ parital refresh, please [contact me](mailto:ray@react0r.com).
 1. Get Raspberry Pi Linux source by following the
 [instructions](https://www.raspberrypi.org/documentation/linux/kernel/building.md)
 
-2. Copy the driver in with other frame buffer drivers:
+2. Copy the driver in with other Frame Buffer drivers:
 ```
 cp wseinkfb.c linux/drivers/video/fbdev/
 ```
 
-2. Apply patches to build process:
+3. Copy the device tree overlay into its build directory:
+```
+cp wseink-overlay.dts linux/arch/arm/boot/dts/overlays/
+```
+
+4. Apply patches to build process:
 ```
 cd linux/
 patch ../driver/build-wseink.patch
 ```
 
-3. Build the kernel. See Raspberry Pi build instructions (linked
+5. Build the kernel. See Raspberry Pi build instructions (linked
 above) for details.
 
 ## Configuration
 
-### Enabling the frame buffer console
+### Enabling the Frame Buffer console
 
 On the RPi, the driver is loaded with the SPI bus after `init` has
 been called. If no other console is available, the Waveshare device
