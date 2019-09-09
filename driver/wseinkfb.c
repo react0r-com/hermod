@@ -24,7 +24,7 @@
 #define WS_DISPLAY_REFRESH                             0x12
 #define WS_IMAGE_PROCESS                               0x13
 #define WS_LUT_FOR_VCOM                                0x20
-#define WS_LUT_BLUE                                    0x21
+#define WS_LUT_BLACK                                   0x21
 #define WS_LUT_WHITE                                   0x22
 #define WS_LUT_GRAY_1                                  0x23
 #define WS_LUT_GRAY_2                                  0x24
@@ -48,7 +48,25 @@
 #define WS_AUTO_MEASUREMENT_VCOM                       0x80
 #define WS_READ_VCOM_VALUE                             0x81
 #define WS_VCM_DC_SETTING                              0x82
+#define WS_FLASH_DISABLE                               0xB9
 #define WS_FLASH_MODE                                  0xE5 /* only in demo */
+
+/* Table size if WS_LUT_REPEAT*N, where N is one LUT type below. Add
+   one for LUT command on sizes on spec. */
+#define WS_LUT_REPEAT                                  20
+
+#define WS_LUT_V_SIZE                                  11
+#define WS_LUT_B_SIZE                                  13
+#define WS_LUT_W_SIZE                                  13
+#define WS_LUT_G1_SIZE                                 13
+#define WS_LUT_G2_SIZE                                 13
+#define WS_LUT_R0_SIZE                                 13
+#define WS_LUT_R1_SIZE                                 13
+#define WS_LUT_R2_SIZE                                 13
+#define WS_LUT_X_SIZE                                  10
+
+/* for fixed buffer allocation */
+#define WS_LUT_MAX_SIZE                                WS_LUT_REPEAT*WS_LUT_B_SIZE
 
 enum ws_eink_devices {
   DEV_WS_213,
@@ -80,7 +98,25 @@ struct ws_eink_state {
   int rst;
   int dc;
   int busy;
+  bool use_flash;
 };
+
+/* These are all guesses that don't seem to work. */
+static u8 lut_vcom_partial[] =
+  { 0x00, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+  };
+
+static u8 lut_white_partial[] =
+  { 0xA0, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+  };
+
+static u8 lut_black_partial[] =
+  { 0x50, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+  };
+
+static u8 lut_xon_partial[] =
+  { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
 
 static void device_write_data(struct ws_eink_state *par, u8 data)
 {
@@ -130,60 +166,142 @@ static void device_reset(struct ws_eink_state *par)
   mdelay(200);
 }
 
+static void set_lut(struct ws_eink_state *par, u8 cmd)
+{
+  u8 lut[WS_LUT_MAX_SIZE];
+  size_t lut_size;
+  u8 *fragment;
+  size_t fragment_size;
+
+  switch (cmd) {
+  case WS_LUT_FOR_VCOM:
+    lut_size = WS_LUT_REPEAT*WS_LUT_V_SIZE;
+    fragment = lut_vcom_partial;
+    fragment_size = sizeof(lut_vcom_partial);
+    break;
+  case WS_LUT_BLACK:
+  case WS_LUT_GRAY_1:
+  case WS_LUT_GRAY_2:
+  case WS_LUT_RED_0:
+  case WS_LUT_RED_1:
+  case WS_LUT_RED_2:
+  case WS_LUT_RED_3:
+    /* Using Red0 as Black on B&W display */
+    lut_size = WS_LUT_REPEAT*WS_LUT_B_SIZE;
+    fragment = lut_black_partial;
+    fragment_size = sizeof(lut_black_partial);
+    break;
+  case WS_LUT_WHITE:
+    lut_size = WS_LUT_REPEAT*WS_LUT_W_SIZE;
+    fragment = lut_white_partial;
+    fragment_size = sizeof(lut_white_partial);
+    break;
+  case WS_LUT_XON:
+    lut_size = WS_LUT_REPEAT*WS_LUT_X_SIZE;
+    fragment = lut_xon_partial;
+    fragment_size = sizeof(lut_xon_partial);
+    break;
+  default:
+    dev_warn(&par->spi->dev, "Attempting to set unsupported LUT\n");
+    return;
+  }
+
+  memset(lut, 0, lut_size);
+  memcpy(lut, fragment, fragment_size);
+  dev_info(&par->spi->dev, "Send %d bytes with LUT command 0x%x\n", lut_size, cmd);
+  device_write_cmd(par, cmd);
+  device_write_data_buf(par, lut, lut_size);
+}
+
 static void init_display(struct ws_eink_state *par)
 {
+  dev_info(&par->spi->dev, "initializing Waveshare device:\n\t SPI %d bpw, mode %x\n\tPanel mode: 0x%X\n",
+	   par->spi->bits_per_word, par->spi->mode,
+	   0xCF | (!par->use_flash&1)<<5);
+
   device_reset(par);
-
-  device_write_cmd(par, WS_POWER_SETTING);
-  device_write_data(par, 0x37); /* default internal power settings */
-  device_write_data(par, 0x00); /* voltage level */
-
-  device_write_cmd(par, WS_PANEL_SETTING);
-  device_write_data(par, 0xCF); /* Resolution: 00b, LUT select: external, Scan: up, Shift: right, Booster: on, Reset: no */
-  device_write_data(par, 0x08); /* VCOM: floating */
 
   device_write_cmd(par, WS_BOOSTER_SOFT_START);
   device_write_data(par, 0xC7); /* A: Soft start phase: 40ms, Driving strength: 1, Min. off time: 6.77us */
   device_write_data(par, 0xCC); /* B: Soft start phase: 40ms, Driving strength: 2, Min. off time: 0.77us */
   device_write_data(par, 0x28); /* C: Driving strength: 6, Min. off time: 0.2us */
-	
+
+  device_write_cmd(par, WS_POWER_SETTING);
+  device_write_data(par, 0x37); /* default internal power settings */
+  device_write_data(par, 0x00); /* voltage level */
+  device_write_data(par, 0x08); /* VDH select for red LUT: 3.8V */
+  device_write_data(par, 0x08); /* VDL select for red LUT: -3.8V */
+
   device_write_cmd(par, WS_POWER_ON);
   device_wait_until_idle(par);
 
+  if (!par->use_flash) {
+    device_write_cmd(par, WS_SPI_FLASH_CONTROL);
+    device_write_data(par, 0x01); /* Enable bypass */
+
+    device_write_cmd(par, WS_FLASH_DISABLE);
+
+    device_write_cmd(par, WS_SPI_FLASH_CONTROL);
+    device_write_data(par, 0x00);
+  }
+
+  device_write_cmd(par, WS_PANEL_SETTING);
+  /* Resolution: 11b, LUT select: !use_flash, Scan: up, Shift: right, Booster: on, Reset: no */
+  device_write_data(par, 0xCF | (!par->use_flash&1)<<5); /* TODO: confirm */
+  device_write_data(par, 0x00);
+
   device_write_cmd(par, WS_PLL_CONTROL);
   device_write_data(par, 0x3C); /* PLL clock: 50 Hz */
-	
-  device_write_cmd(par, WS_TEMPERATURE_CALIBRATION);
-  device_write_data(par, 0x00); /* Sensor select: internal sensor */
-	
-  device_write_cmd(par, WS_VCOM_AND_DATA_INTERVAL_SETTING);
-  //device_write_data(par, 0x77); /* Border selection: White, Data polarity: 1, VCOM and data interval: 10 */
-  device_write_data(par, 0x67);
-
-  device_write_cmd(par, WS_TCON_SETTING);
-  device_write_data(par, 0x22); /* Source to gate: 12, Gate to source: 12 */
 
   device_write_cmd(par, WS_TCON_RESOLUTION);
-  device_write_data(par, par->props->width >> 8); /* 640 */
-  device_write_data(par, par->props->width & 0xff);
-  device_write_data(par, par->props->height >> 8); /* 384 */
-  device_write_data(par, par->props->height & 0xff);
+  device_write_data(par, par->props->width>>8); /* HRES */
+  device_write_data(par, par->props->width);
+  device_write_data(par, par->props->height>>8); /* VRES */
+  device_write_data(par, par->props->height);
 
   device_write_cmd(par, WS_VCM_DC_SETTING);
   device_write_data(par, 0x1E); /* -3.0V */
-  
-  device_write_cmd(par, WS_FLASH_MODE);
-  device_write_data(par, 0x03); /* Undocumented */
+
+  device_write_cmd(par, WS_VCOM_AND_DATA_INTERVAL_SETTING);
+  device_write_data(par, 0x77); /* Border selection: White, Data polarity: 1, VCOM and data interval: 10 */
+  //device_write_data(par, 0x67); /* Invert colors */
+
+  if (par->use_flash) {
+    device_write_cmd(par, WS_FLASH_MODE);
+    device_write_data(par, 0x3); /* "Define the flash" */
+  }
+
 }
 
 static void display_frame(struct ws_eink_state *par)
 {
+
+  if (!par->use_flash) {
+    /* Negligible time to send LUT */
+    set_lut(par, WS_LUT_FOR_VCOM);
+    set_lut(par, WS_LUT_BLACK);
+    set_lut(par, WS_LUT_WHITE);
+    set_lut(par, WS_LUT_GRAY_1);
+    set_lut(par, WS_LUT_GRAY_2);
+    set_lut(par, WS_LUT_RED_0);
+    set_lut(par, WS_LUT_RED_1);
+    set_lut(par, WS_LUT_RED_2);
+    set_lut(par, WS_LUT_RED_3);
+    set_lut(par, WS_LUT_XON);
+  }
+
+  /* Takes about 400 ms to send data with 3.125 Mhz SPI clock */
   device_write_cmd(par, WS_DATA_START_TRANSMISSION_1);
   device_write_data_buf(par, par->info->screen_base, par->info->fix.smem_len);
+
+  /* This doesn't seem to make a difference. */
   //device_write_cmd(par, WS_DATA_STOP);
   //device_wait_until_idle(par);
+
   //device_write_cmd(par, WS_IMAGE_PROCESS);
   //device_write_data(par, 0x14); /* Action: enable, Selection: all pixels */
+
+  /* Takes about 4s to refresh in use_flash mode */
   device_write_cmd(par, WS_DISPLAY_REFRESH);
   device_wait_until_idle(par);
 }
@@ -368,12 +486,13 @@ static int ws_eink_spi_probe(struct spi_device *spi)
   fb_deferred_io_init(info);
 
   par = info->par;
-  par->info	= info;
-  par->spi	= spi;
-  par->props    = props;
-  par->rst	= rst_gpio;
-  par->dc	= dc_gpio;
-  par->busy	= busy_gpio;
+  par->info		= info;
+  par->spi		= spi;
+  par->props		= props;
+  par->rst		= rst_gpio;
+  par->dc		= dc_gpio;
+  par->busy		= busy_gpio;
+  par->use_flash  	= true; /* TODO: make available to sysfs  */
 
   ret = register_framebuffer(info);
   if (ret < 0) {
@@ -383,9 +502,6 @@ static int ws_eink_spi_probe(struct spi_device *spi)
 
   spi_set_drvdata(spi, par);
 
-  dev_info(dev, "initializing Waveshare device with %d bpw, mode %x.\n",
-	   spi->bits_per_word,
-	   spi->mode);
   init_display(par);
 
   /* wipe screen */
